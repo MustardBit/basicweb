@@ -1,140 +1,55 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"sync/atomic"
-	"time"
-)
 
-type key int
-
-const (
-	requestIDKey key = 0
+	"github.com/valyala/fasthttp"
 )
 
 var (
-	Version      string = ""
-	GitTag       string = ""
-	GitCommit    string = ""
-	GitTreeState string = ""
-	listenAddr   string
-	healthy      int32
+	addr     = flag.String("addr", ":8080", "TCP address to listen to")
+	compress = flag.Bool("compress", false, "Whether to enable transparent response compression")
 )
 
 func main() {
-	flag.StringVar(&listenAddr, "listen-addr", ":80", "server listen address")
 	flag.Parse()
 
-	logger := log.New(os.Stdout, "http: ", log.LstdFlags)
-
-	logger.Println("Simple go server")
-	logger.Println("Version:", Version)
-	logger.Println("GitTag:", GitTag)
-	logger.Println("GitCommit:", GitCommit)
-	logger.Println("GitTreeState:", GitTreeState)
-
-	logger.Println("Server is starting...")
-
-	router := http.NewServeMux()
-	router.Handle("/", index())
-	router.Handle("/healthz", healthz())
-
-	nextRequestID := func() string {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+	h := requestHandler
+	if *compress {
+		h = fasthttp.CompressHandler(h)
 	}
 
-	server := &http.Server{
-		Addr:         listenAddr,
-		Handler:      tracing(nextRequestID)(logging(logger)(router)),
-		ErrorLog:     logger,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  15 * time.Second,
-	}
-
-	done := make(chan bool)
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt)
-
-	go func() {
-		<-quit
-		logger.Println("Server is shutting down...")
-		atomic.StoreInt32(&healthy, 0)
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		server.SetKeepAlivesEnabled(false)
-		if err := server.Shutdown(ctx); err != nil {
-			logger.Fatalf("Could not gracefully shutdown the server: %v\n", err)
-		}
-		close(done)
-	}()
-
-	logger.Println("Server is ready to handle requests at", listenAddr)
-	atomic.StoreInt32(&healthy, 1)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Fatalf("Could not listen on %s: %v\n", listenAddr, err)
-	}
-
-	<-done
-	logger.Println("Server stopped")
-}
-
-func index() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "Hello, World!")
-	})
-}
-
-func healthz() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.LoadInt32(&healthy) == 1 {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		w.WriteHeader(http.StatusServiceUnavailable)
-	})
-}
-
-func logging(logger *log.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
-				requestID, ok := r.Context().Value(requestIDKey).(string)
-				if !ok {
-					requestID = "unknown"
-				}
-				logger.Println(requestID, r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent())
-			}()
-			next.ServeHTTP(w, r)
-		})
+	if err := fasthttp.ListenAndServe(*addr, h); err != nil {
+		log.Fatalf("Error in ListenAndServe: %s", err)
 	}
 }
 
-func tracing(nextRequestID func() string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			requestID := r.Header.Get("X-Request-Id")
-			if requestID == "" {
-				requestID = nextRequestID()
-			}
-			ctx := context.WithValue(r.Context(), requestIDKey, requestID)
-			w.Header().Set("X-Request-Id", requestID)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
+func requestHandler(ctx *fasthttp.RequestCtx) {
+	fmt.Fprintf(ctx, "Hello, world!\n\n")
+
+	fmt.Fprintf(ctx, "Request method is %q\n", ctx.Method())
+	fmt.Fprintf(ctx, "RequestURI is %q\n", ctx.RequestURI())
+	fmt.Fprintf(ctx, "Requested path is %q\n", ctx.Path())
+	fmt.Fprintf(ctx, "Host is %q\n", ctx.Host())
+	fmt.Fprintf(ctx, "Query string is %q\n", ctx.QueryArgs())
+	fmt.Fprintf(ctx, "User-Agent is %q\n", ctx.UserAgent())
+	fmt.Fprintf(ctx, "Connection has been established at %s\n", ctx.ConnTime())
+	fmt.Fprintf(ctx, "Request has been started at %s\n", ctx.Time())
+	fmt.Fprintf(ctx, "Serial request number for the current connection is %d\n", ctx.ConnRequestNum())
+	fmt.Fprintf(ctx, "Your ip is %q\n\n", ctx.RemoteIP())
+
+	fmt.Fprintf(ctx, "Raw request is:\n---CUT---\n%s\n---CUT---", &ctx.Request)
+
+	ctx.SetContentType("text/plain; charset=utf8")
+
+	// Set arbitrary headers
+	ctx.Response.Header.Set("X-My-Header", "my-header-value")
+
+	// Set cookies
+	var c fasthttp.Cookie
+	c.SetKey("cookie-name")
+	c.SetValue("cookie-value")
+	ctx.Response.Header.SetCookie(&c)
 }
