@@ -57,7 +57,7 @@ type controller struct {
 }
 
 func main() {
-	listenAddr := ":5000"
+	listenAddr := ":8080"
 	if len(os.Args) == 2 {
 		listenAddr = os.Args[1]
 	}
